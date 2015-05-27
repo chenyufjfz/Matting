@@ -3,7 +3,7 @@
 #include "targetver.h"
 #include "../matting/Gpuopt.h"
 #include "../matting/matting.h"
-
+#include "../matting/MattingPostProcess.h"
 static Color32 * tex[2];
 static int width;
 static int height;

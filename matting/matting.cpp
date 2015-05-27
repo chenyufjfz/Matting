@@ -3,7 +3,7 @@
 #include "Gpuopt.h"
 #include <stdio.h>
 #include "matting.h"
-
+#include "MattingPostProcess.h"
 #include <vector>
 #include <string>
 #include <iostream>
@@ -21,10 +21,10 @@ const int frame_start = 84;//84,53
 const int frame_end = 669;//450,230
 
 
-int body_top = 156;
-int body_bottom = 529;
-int body_left = 664;
-int body_right = 708;
+extern int body_top ;
+extern int body_bottom ;
+extern int body_left ;
+extern int body_right ;
 
 const int alpha_top = 40;
 const int alpha_bottom = 40;
@@ -48,16 +48,7 @@ do { \
 	} \
 } while (0)
 
-int raise_hand_l = 0;
-int raise_hand_r = 0;
 
-const float rasie_hands_th = 0.05;
-const unsigned raise_frames = 0;
-
-vector<Point2f> body_metries;
-
-void FindContour(Mat & m, int block_th);
-vector<Point2f> FindGeometry(const Mat & img, float rasie_hands_radius);
 Matting * matting;
 
 struct TuningPara init_value = {
@@ -74,7 +65,7 @@ struct TuningPara init_value = {
 	32,
 	7,
 	500,
-	1.2,
+	1.2f,
 	1,
 	0.0f,
 	0.7f
@@ -280,45 +271,6 @@ static void sum_channel(const Mat & rgb, Mat &mono)
 	}
 }
 
-void GammaCorrection(Mat& src, float fGamma)
-{
-	CV_Assert(src.data);
-	// accept only char type matrices
-	CV_Assert(src.depth() != sizeof(uchar));
-	// build look up table
-	unsigned char lut[256];
-	for (int i = 0; i < 256; i++)
-	{
-		lut[i] = saturate_cast<uchar>(pow((float)(i / 255.0), fGamma) * 255.0f);
-	}
-
-	const int channels = src.channels();
-	switch (channels)
-	{
-	case 1:
-	{
-		MatIterator_<uchar> it, end;
-		for (it = src.begin<uchar>(), end = src.end<uchar>(); it != end; it++)
-			*it = lut[(*it)];
-
-		break;
-	}
-	case 3:
-	{
-		MatIterator_<Vec3b> it, end;
-		for (it = src.begin<Vec3b>(), end = src.end<Vec3b>(); it != end; it++)
-		{
-			(*it)[0] = lut[((*it)[0])];
-			(*it)[1] = lut[((*it)[1])];
-			(*it)[2] = lut[((*it)[2])];
-		}
-
-		break;
-
-	}
-	}
-}
-
 MattingCPUOrg::MattingCPUOrg()
 {
 	frame_num = -1;
@@ -437,7 +389,7 @@ void MattingCPUOrg::process(Mat & frame_rgb)
 		const float * p_bg_diff_yuv = bg_diff_yuv.ptr<float>(y);
 		//const unsigned short * p_bg_diff = bg_diff_sum.ptr<unsigned short>(y);
 		for (int x = 1; x < frame_rgb.cols - 1; x++) {
-			edge_offset = max(abs((float)py_dec[3 * x - 3] - (float)py_inc[3 * x + 3]),
+			edge_offset = (unsigned) max(abs((float)py_dec[3 * x - 3] - (float)py_inc[3 * x + 3]),
 				abs((float)py_dec[3 * x + 3] - (float)py_inc[3 * x - 3])) / 2;
 			//anti_shade = max(0, (y - gray.rows / 2) / 32);
 			if (p_motion_diff[x] < edge_offset + Const.motion_TH)//dzh modify
@@ -520,11 +472,11 @@ void MattingCPUOrg::process(Mat & frame_rgb)
 				}
 				if (p_is_body[x])
 				{
-					motion_th = Const.alpha_TH / 2;
+					motion_th = (float) Const.alpha_TH / 2;
 				}
 				else
 				{
-					motion_th = Const.alpha_TH;
+					motion_th = (float) Const.alpha_TH;
 				}
 
 				if (bg_diff_all > motion_th * 2)
@@ -565,11 +517,8 @@ void MattingCPUOrg::process(Mat & frame_rgb)
 	alpha_erode = alpha_erode * 255;
 
 	FindContour(alpha_erode, Const.block_th);
-	body_metries = FindGeometry(alpha_erode, Const.rasie_hands_radius);
-	for (int i = 0; i < body_metries.size(); i++) {
-		body_metries[i].x = body_metries[i].x / frame_rgb.cols * out_width;
-		body_metries[i].y = body_metries[i].y / frame_rgb.rows * out_height;
-	}
+	FindGeometry(alpha_erode, Const.rasie_hands_radius, (float)out_width / frame_rgb.cols, (float)out_height / frame_rgb.rows);
+	
 
 	alpha_erode = alpha_erode / 255;
 	Mat alpha_filter, alpha_filter_max, alpha_filter_F;
@@ -856,11 +805,8 @@ void MattingCPU::process(Mat & frame)
 	alpha_erode = alpha_erode * 255;
 	CV_Assert(alpha_erode.type() == CV_8U);
 	FindContour(alpha_erode, Const.block_th);
-	body_metries = FindGeometry(alpha_erode, Const.rasie_hands_radius);
-	for (int i = 0; i < body_metries.size(); i++) {
-		body_metries[i].x = body_metries[i].x / frame.cols * out_width;
-		body_metries[i].y = body_metries[i].y / frame.rows * out_height;
-	}
+	FindGeometry(alpha_erode, Const.rasie_hands_radius, (float)out_width / frame.cols, (float)out_height / frame.rows);
+
 	alpha_erode.convertTo(alpha_filter_F, CV_32F, 1.0 / 255);
 
 	cv::boxFilter(alpha_filter_F, alpha_filter, -1, Size(Const.alpha_filter_r, Const.alpha_filter_r), Point(-1, -1), true);
@@ -1119,11 +1065,8 @@ void MattingGPU::process(Mat & frame)
 		alpha_erode_cpu.createMatHeader().copyTo(alpha_erode);
 		FindContour(alpha_erode, Const.block_th);
 		
-		body_metries = FindGeometry(alpha_erode, Const.rasie_hands_radius);
-		for (int i = 0; i < body_metries.size(); i++) {
-			body_metries[i].x = body_metries[i].x / frame.cols * out_width;
-			body_metries[i].y = body_metries[i].y / frame.rows * out_height;
-		}
+		FindGeometry(alpha_erode, Const.rasie_hands_radius, (float)out_width /frame.cols, (float) out_height /frame.rows);
+		
 		alpha_erode.convertTo(alpha_filter_F, CV_32F, 1.0 / 255);
 
 		cv::boxFilter(alpha_filter_F, alpha_filter, -1, Size(Const.alpha_filter_r, Const.alpha_filter_r), Point(-1, -1), true);
@@ -1320,13 +1263,15 @@ void write_texture(Color32 *tex, int wide, int height)
 MattingFifo::MattingFifo()
 {	
 	buf_update = 0;
+	lost = 0;
 }
 
 void MattingFifo::put(Mat & frame)
 {
+	if (buf_update)
+		lost++;
 	buf_lock.lock();
-	mat_buf = frame;
-	frame.release();
+	mat_buf = frame.clone();
 	buf_update = 1;
 	buf_lock.unlock();
 }
@@ -1338,7 +1283,6 @@ bool MattingFifo::get(Mat & frame)
 	buf_lock.lock();
 	frame = mat_buf;
 	buf_update = 0;
-	mat_buf.release();
 	buf_lock.unlock();
 	return true;
 }
@@ -1352,7 +1296,7 @@ void process_camera_img_thread()
 		if (matting_fifo->get(frame))
 			matting->process(frame);
 		else {
-			chrono::milliseconds dura(5);
+			chrono::milliseconds dura(1);
 			this_thread::sleep_for(dura);
 		}
 	}
@@ -1391,282 +1335,6 @@ void wait_produce_thread_end()
 {
 	produce->join();
 	delete produce;
-}
-
-void FindContour(Mat & img, int block_th)
-{
-	//img是一个由0，255组成的二值图
-	IplImage* src = &(img.operator IplImage());
-	IplImage* dst = cvCreateImage(cvGetSize(src), 8, 1);
-	IplImage* msk = cvCreateImage(cvGetSize(src), 8, 1);
-	IplImage* msk2 = cvCloneImage(src);
-	IplImage* msk3 = cvCloneImage(src);
-	cvZero(msk);
-	cvZero(dst);		// 清空数组
-
-	// 提取人体外围轮廓
-	CvMemStorage* storage = cvCreateMemStorage(0);
-	CvSeq* contour = 0;
-	int contour_num = cvFindContours(src, storage, &contour, sizeof(CvContour), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
-	CvSeq *_contour = contour;
-	double maxarea = 0;
-	double minarea = 100;
-	for (; contour != 0; contour = contour->h_next)
-	{
-
-		double tmparea = fabs(cvContourArea(contour));
-		if (tmparea < minarea)
-		{
-			cvSeqRemove(contour, 0); // 删除面积小于设定值的轮廓
-			continue;
-		}
-		if (tmparea > maxarea)
-		{
-			maxarea = tmparea;
-		}
-	}
-	contour = _contour;
-	int count = 0;
-	for (; contour != 0; contour = contour->h_next)
-	{
-		count++;
-		double tmparea = fabs(cvContourArea(contour));
-		if ((tmparea == maxarea) && (tmparea > minarea))
-		{
-			CvScalar color = CV_RGB(255, 255, 255);
-			cvDrawContours(msk, contour, color, color, -1, -1, 8);
-		}
-	}
-
-	Mat msk2_;
-	msk2_ = Mat(msk2);
-	Mat msk3_;
-	msk3_ = Mat(msk3);
-	for (int y = 0; y < msk2_.rows; y++)
-	{
-		unsigned char* p_msk2 = msk2_.ptr<unsigned char>(y);
-		unsigned char* p_msk3 = msk3_.ptr<unsigned char>(y);
-		const unsigned char* p_msk = ((Mat)msk).ptr<unsigned char>(y);
-		for (int x = 0; x < msk2_.cols; x++)
-		{
-			if (p_msk[x] == 0)
-			{
-				p_msk2[x] = 0;
-				p_msk3[x] = 0;
-			}
-			else
-			{
-				p_msk3[x] = 255;
-				if (p_msk2[x] == 0)
-					p_msk2[x] = 255;
-				else
-					p_msk2[x] = 0;
-			}
-		}
-
-	}
-
-	//提取人体包含内部轮廓
-	CvMemStorage* storage2 = cvCreateMemStorage(0);
-	CvSeq* contour2 = 0;
-	int contour_num2 = cvFindContours(msk2, storage2, &contour2, sizeof(CvContour), CV_RETR_CCOMP, CV_CHAIN_APPROX_SIMPLE);
-	double minarea2 = block_th;
-	int count2 = 0;
-	for (; contour2 != 0; contour2 = contour2->h_next)
-	{
-
-		double tmparea = fabs(cvContourArea(contour2));
-		if (tmparea < minarea2)
-		{
-			cvSeqRemove(contour2, 0); // 删除面积小于设定值的轮廓
-			continue;
-		}
-		// 创建一个色彩值
-		CvScalar color = CV_RGB(255, 255, 255);
-		cvDrawContours(dst, contour2, color, color, 0, -1, 8);	//绘制外部和内部的轮廓
-		count2++;
-	}
-
-	for (int y = 0; y < msk3_.rows; y++)
-	{
-		unsigned char* p_msk3 = msk3_.ptr<unsigned char>(y);
-		const unsigned char* p_msk = ((Mat)dst).ptr<unsigned char>(y);
-		for (int x = 0; x < msk3_.cols; x++)
-		{
-			if (p_msk[x] == 255)
-				p_msk3[x] = 0;
-		}
-
-	}
-
-	//img = msk3;//返回结果
-
-	Mat img_tmp;
-	img_tmp = msk3;//返回结果
-	img = img_tmp.clone();
-
-	cvReleaseMemStorage(&storage);
-	cvReleaseMemStorage(&storage2);
-	//cvReleaseImage(&src);
-	cvReleaseImage(&dst);
-	cvReleaseImage(&msk);
-	cvReleaseImage(&msk2);
-	cvReleaseImage(&msk3);
-}
-
-bool raise_hand_left(int &x, int &y)
-{
-	if (body_metries.size() < 6)
-		return false;
-	Point2f  left;
-	left = body_metries[1];
-	x = (int)left.x;
-	y = (int)left.y;
-	return raise_hand_l > raise_frames;
-}
-bool raise_hand_right(int &x, int &y)
-{
-	if (body_metries.size() < 6)
-		return false;
-	Point2f  right;
-	right = body_metries[2];
-	x = (int)right.x;
-	y = (int)right.y;
-	
-	return raise_hand_r > raise_frames;
-}
-
-float distance_l2(Point2f p1, Point2f p2)
-{
-	return sqrtf((p1.x - p2.x)*(p1.x - p2.x) + (p1.y - p2.y)*(p1.y - p2.y));
-}
-
-
-vector<Point2f> FindGeometry(const Mat & img, float rasie_hands_radius)
-{
-	//质心，宽度，极值点
-	Point2f  centroid, left, right, top, bottom;
-	Point2f body_width;
-	left.x = img.cols;
-	top.y = img.rows;
-
-	int area = 0;//像素数目
-	for (int y = 0; y < img.rows; y++)
-	{
-		const unsigned char * p_img = img.ptr<unsigned char>(y);
-		for (int x = 0; x < img.cols; x++)
-		{
-			if (p_img[x] == 255)
-			{
-				centroid.x += x;
-				centroid.y += y;
-				if (x < left.x)
-				{
-					left.x = x;
-					left.y = y;
-				}
-				if (x > right.x)
-				{
-					right.x = x;
-					right.y = y;
-				}
-				if (y < top.y)
-				{
-					top.x = x;
-					top.y = y;
-				}
-				if (y > bottom.y)
-				{
-					bottom.x = x;
-					bottom.y = y;
-				}
-				area++;
-			}
-		}
-	}
-	if (area>0)
-	{
-		centroid.x /= area;
-		centroid.y /= area;
-		body_width.x = area / (bottom.y - top.y);
-	}
-	left.x = img.cols;
-	right.x = 0;
-	for (int y = 0; y < centroid.y; y++)
-	{
-		const unsigned char * p_img = img.ptr<unsigned char>(y);
-		for (int x = 0; x < img.cols; x++)
-		{
-			if (p_img[x] == 255)
-			{
-				if (x < left.x)
-				{
-					left.x = x;
-					left.y = y;
-				}
-				if (x > right.x)
-				{
-					right.x = x;
-					right.y = y;
-				}
-			}
-		}
-	}
-	Point2f body_tl, body_br;
-	//设置body区域
-	{
-		body_tl.x = centroid.x - body_width.x;
-		body_tl.y = top.y + (centroid.y - top.y) / 3;
-		body_br.x = centroid.x + body_width.x;
-		body_br.y = bottom.y;
-		body_top = body_tl.y;
-		body_left = body_tl.x;
-		body_right = body_br.x;
-		body_bottom = body_br.y;
-	}
-	//判断是否升左右手
-	static Point2f pre_left;
-	static Point2f pre_right;
-	{
-		Point2f heart;
-
-		heart.x = (top.x + centroid.x) / 2;
-		heart.y = (top.y + centroid.y) / 2;
-		if ((distance_l2(heart, left) > body_width.x*rasie_hands_radius)
-			&& (distance_l2(pre_left, left) < body_width.x*rasie_hands_th))
-		{
-			raise_hand_l++;
-		}
-		else
-		{
-			raise_hand_l = 0;
-		}
-		if ((distance_l2(heart, right) > body_width.x*rasie_hands_radius)
-			&& (distance_l2(pre_right, right) < body_width.x*rasie_hands_th))
-		{
-			raise_hand_r++;
-		}
-		else
-		{
-			raise_hand_r = 0;
-		}
-	}
-	pre_left = left;
-	pre_right = right;
-
-
-	vector<Point2f> ret_val;
-	ret_val.push_back(centroid);
-	ret_val.push_back(left);
-	ret_val.push_back(right);
-	ret_val.push_back(top);
-	ret_val.push_back(bottom);
-	ret_val.push_back(body_width);
-
-	/*cout << centroid << endl;
-	cout << left << right << top << bottom << endl;
-	cout << body_width << endl;*/
-	return ret_val;
 }
 
 

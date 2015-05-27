@@ -143,8 +143,10 @@ protected:
 	cv::Mat mat_buf;
 	std::mutex buf_lock;
 	int buf_update;
+	int lost;
 public:
 	MattingFifo();
+	int get_lost() { return lost; }
 	void put(cv::Mat & frame);
 	bool get(cv::Mat & frame);
 };
@@ -152,6 +154,4 @@ public:
 void init_produce_thread(int mode, int produce_rate_);
 void wait_produce_thread_end();
 void write_texture(Color32 *tex, int wide, int height);
-bool raise_hand_left(int &x, int &y);
-bool raise_hand_right(int &x, int &y);
 #endif

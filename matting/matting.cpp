@@ -1182,8 +1182,15 @@ bool get_nextimg(Mat & m)
 	string file;
 	file = input_path + num;
 	m = imread(file);
-	if (m.data == NULL)
-		return false;
+	if (m.data == NULL) {
+		sprintf_s(num, "%d.bmp", img_idx++);
+		file = input_path + num;
+		m = imread(file);
+		if (m.data == NULL)
+			return false;
+		else
+			return true;
+	}
 	else
 		return true;
 }

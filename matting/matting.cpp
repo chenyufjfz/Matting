@@ -970,6 +970,11 @@ bool MattingGPU::tune_parameter(TuningPara & para)
 
 void MattingGPU::process(Mat & frame)
 {
+	Mat frame_bak, frame_resized;
+	resize(frame, frame_resized, Size(638,512));
+	frame_bak = frame;
+	frame = frame_resized;
+
 	GpuMat motion_diff_rgb, split_buf[CHANNEL], motion_diff_rgb_filted[CHANNEL], frame_yuv, bg_diff_yuv, bg_diff_filted[CHANNEL];
 	GpuMat fg_maybe, fg_sure, fg_sure_d, fg_sure_dilate, alpha_raw;
 	Mat alpha_filter_F, alpha_filter;
@@ -1004,10 +1009,12 @@ void MattingGPU::process(Mat & frame)
 		static_num_gpu.setTo(0);
 		is_bg_gpu.create(frame.rows, frame.cols, CV_8U);
 		is_bg_gpu.setTo(1);
+		is_bg_cpu.create(frame.rows, frame.cols, CV_8U);		
 		is_body_gpu.create(frame.rows, frame.cols, CV_8U);
 		is_body_gpu.setTo(0);
 		alpha_erode_gpu.create(frame.rows, frame.cols, CV_8U);
 		alpha_erode_gpu.setTo(0);
+		alpha_erode_cpu.create(frame.rows, frame.cols, CV_8U);
 		Mat kx = Mat::ones(5, 1, CV_32F);
 		kx = kx / 5.0f;
 		box_filter = gpu::createSeparableLinearFilter_GPU(CV_32FC1, CV_32FC1, kx, kx, box_buf);
@@ -1027,6 +1034,8 @@ void MattingGPU::process(Mat & frame)
 	if (frame_num > 1) {
 		stream.waitForCompletion();
 		frame_rgb_gpu.swap(frame_rgb_pre_gpu);
+		if (frame_num > 2)
+			stream.enqueueUpload(is_bg_cpu, is_bg_gpu);
 	}
 #if PROFILE ==1
 	double gpu_complete = ((double)getTickCount() - start) / getTickFrequency();
@@ -1073,25 +1082,18 @@ void MattingGPU::process(Mat & frame)
 		gpu_heap.free(bg_diff_filted[i]);
 	gpu_heap.free(bg_diff_yuv);
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_8UC1, fg_sure_d);
-#if 0
-	Mat element = getStructuringElement(MORPH_RECT, Size(21, 21), Point(10, 10));			
-	gpu::dilate(fg_sure, fg_sure_d, element, dilate_buf, Point(-1,-1), 1, stream);
-#else
+
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_16UC1, fg_sure_dilate);
 	dilate_filter->apply(fg_sure, fg_sure_dilate, Rect(0, 0, -1, -1), stream);
 	gpu::compare(fg_sure_dilate, 0, fg_sure_d, CMP_GT, stream);
-#endif
-	gpu::compare(fg_sure_d, 0, is_bg_gpu, CMP_EQ, stream);
+
+	//gpu::compare(fg_sure_d, 0, is_bg_gpu, CMP_EQ, stream);
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_8UC1, alpha_raw);
 	gpu::bitwise_and(fg_maybe, fg_sure_d, alpha_raw, cv::gpu::GpuMat(), stream);
 
-#if 0	
-	Mat element1 = getStructuringElement(MORPH_RECT, Size(3, 3), Point(1, 1));
-	gpu::erode(alpha_raw, alpha_erode_gpu, element1, dilate_buf, Point(-1, -1), 1, stream);	
-#else
-	erode_filter->apply(alpha_raw, alpha_erode_gpu, Rect(0, 0, -1, -1), stream); 
-#endif
-	gpu::multiply(alpha_erode_gpu, Scalar::all(255.0), alpha_erode_gpu, 1.0, -1, stream);
+	//erode_filter->apply(alpha_raw, alpha_erode_gpu, Rect(0, 0, -1, -1), stream); 
+
+	gpu::multiply(alpha_raw, Scalar::all(255.0), alpha_erode_gpu, 1.0, -1, stream);
 
 #if PROFILE == 1
 	double gpu_launch_complete = ((double)getTickCount() - start) / getTickFrequency() - gpu_complete;
@@ -1103,9 +1105,11 @@ void MattingGPU::process(Mat & frame)
 		FindContour(alpha_erode, Const.block_th);
 		
 		FindGeometry(alpha_erode, Const.rasie_hands_radius, (float)out_width /frame.cols, (float) out_height /frame.rows);
-		
-		alpha_erode.convertTo(alpha_filter_F, CV_32F, 1.0 / 255);
+		Mat temp = (alpha_erode == 0);
+		temp.copyTo(is_bg_cpu.createMatHeader());
 
+		alpha_erode.convertTo(alpha_filter_F, CV_32F, 1.0 / 255);
+		
 		cv::boxFilter(alpha_filter_F, alpha_filter, -1, Size(Const.alpha_filter_r, Const.alpha_filter_r), Point(-1, -1), true);
 		alpha_filter.convertTo(alpha_filter, CV_32F, 2.0, -1.0);
 		cv::max(alpha_filter, 0, alpha_filter);

@@ -111,7 +111,7 @@ class MattingGPU : public Matting
 protected:
 	cv::gpu::GpuMat frame_rgb_raw_gpu, frame_rgb_gpu, frame_rgb_pre_gpu, bg_yuv_gpu, static_num_gpu, is_bg_gpu, is_body_gpu, alpha_erode_gpu, box_buf, dilate_buf, erode_buf;
 	cv::gpu::CudaMem frame_rgb_cpu, alpha_erode_cpu;
-	cv::gpu::CudaMem  bg_yuv_cpu;
+	cv::gpu::CudaMem  bg_yuv_cpu, is_bg_cpu;
 	cv::Mat out_mask, out_rgb, out_rgb_buf;
 	cv::gpu::Stream stream;
 	volatile int out_update, const_updated;

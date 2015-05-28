@@ -2,6 +2,7 @@
 //
 #include "Gpuopt.h"
 #include <stdio.h>
+#define MATTING_C
 #include "matting.h"
 #include "MattingPostProcess.h"
 #include <vector>
@@ -30,23 +31,6 @@ const int alpha_top = 40;
 const int alpha_bottom = 40;
 const int alpha_left = 120;
 const int alpha_right = 120;
-
-#define PRINT_LEVEL 0
-#define DBG_LEVEL 0
-#define ERR_LEVEL 1
-static FILE * log_fp = NULL;
-#define LOG(MSG, LEVEL) \
-do { \
-	if (LEVEL >= PRINT_LEVEL) {\
-		if (log_fp==NULL) \
-			fopen_s(&log_fp, "log.txt", "w"); \
-				else \
-			fopen_s(&log_fp, "log.txt", "a"); \
-		fprintf(log_fp, "%s\n", MSG); \
-		fclose(log_fp); \
-		log_fp = (FILE *) 0xfff0000; \
-	} \
-} while (0)
 
 
 Matting * matting;
@@ -164,24 +148,83 @@ void check_tune_para_thread()
 {
 	TuningPara tune_para, old_tune_para;
 
-	LOG("check tune parameter thread start", DBG_LEVEL);
+	LOG(DBG_LEVEL, "check tune parameter thread start");
 	old_tune_para = init_value;
 	matting->tune_parameter(init_value);
 	write_tune_para("TuningOut.xml", init_value);
 	while (1) {
-		LOG("update tun parameter", DBG_LEVEL);
-		if (read_tune_para("TuningIn.xml", tune_para)) {
-			LOG("update tun parameter 2", DBG_LEVEL);
+		LOG(DBG_LEVEL, "read tune parameter");
+		if (read_tune_para("TuningIn.xml", tune_para)) {			
 			write_tune_para("TuningOut.xml", tune_para);
 			if (!(old_tune_para == tune_para)) {
 				old_tune_para = tune_para;
-				LOG("update tun parameter 3", DBG_LEVEL);
+				LOG(DBG_LEVEL, "tune parameter change, update");
 				matting->tune_parameter(tune_para);
 			}
 		}
 		chrono::milliseconds dura(500);
 		this_thread::sleep_for(dura);
 	}
+}
+
+MattingLog::MattingLog(string _filename, int _print_level, bool _log_time)
+{
+	start_time = (double)getTickCount();
+	filename = _filename;
+	print_level = _print_level;
+	log_time = _log_time;
+	fopen_s(&log_fp, _filename.c_str(), "w");
+	fclose(log_fp);
+	log_len = 0;
+	log_buf = (char *)malloc(LOG_BUFFER);
+}
+MattingLog::~MattingLog()
+{
+	flush();
+	free(log_buf);
+}
+double MattingLog::get_time()
+{
+	return ((double)getTickCount() - start_time) / getTickFrequency();
+}
+
+void MattingLog::log(char * s, int len)
+{
+	if (len + log_len +10 >= LOG_BUFFER)
+		return;
+	lock.lock();
+	if (log_time)
+		log_len += sprintf_s(&log_buf[log_len], LOG_BUFFER-log_len, "%9.4f:", get_time());
+	memcpy(&log_buf[log_len], s, len);
+	log_len += len;
+	lock.unlock();
+}
+
+void MattingLog::flush()
+{
+	if (log_len == 0)
+		return;
+	fopen_s(&log_fp, filename.c_str(), "a");
+	lock.lock();
+	fwrite(log_buf, 1, log_len, log_fp);
+	log_len = 0;
+	lock.unlock();
+	fclose(log_fp);
+}
+
+void log_thread()
+{
+	while (1) {
+		matting_log->flush();
+		chrono::milliseconds dura(1000);
+		this_thread::sleep_for(dura);
+	}
+}
+
+void init_log()
+{
+	matting_log = new MattingLog();
+	new thread(log_thread);
 }
 
 static void sum_channel(const Mat & rgb, Mat &mono)
@@ -561,6 +604,7 @@ int MattingCPUOrg::get_out(Color32 * tex)
 	}
 	out_update = 0;
 	out_lock.unlock();
+	LOG(DBG_LEVEL, "MattingCPUOrg get output");
 	return 1;
 }
 
@@ -639,6 +683,7 @@ int MattingCPU::get_out(Color32 * tex)
 			p_tex[x].r = p_out_rgb[3 * x + 2];
 		}
 	}
+	LOG(DBG_LEVEL, "MattingCPU get output");
 	return 1;
 }
 
@@ -1053,14 +1098,6 @@ void MattingGPU::process(Mat & frame)
 	gpu_launch += gpu_launch_complete;
 #endif	
 	if (frame_num > 1) {
-#if SHOW_BG==1	
-		Mat bg;
-		bg_yuv_cpu.createMatHeader().convertTo(bg, CV_8UC3, 255.0);
-		cvtColor(bg, bg, CV_YCrCb2BGR);
-		imshow("bg_rgb", bg);
-		cvWaitKey(10);
-		stream.enqueueDownload(bg_yuv_gpu, bg_yuv_cpu);
-#endif
 		Mat alpha_erode;
 		alpha_erode_cpu.createMatHeader().copyTo(alpha_erode);
 		FindContour(alpha_erode, Const.block_th);
@@ -1106,8 +1143,9 @@ void MattingGPU::process(Mat & frame)
 	resize(frame, out_rgb_buf, Size(out_width, out_height));
 #if PROFILE==1
 	double cpu_complete = ((double)getTickCount() - start) / getTickFrequency() - gpu_launch_complete - gpu_complete;
+	LOG(DBG_LEVEL, "gpu_wait %f, gpu_launch %f, cpu_process %f", gpu_complete, gpu_launch_complete, cpu_complete);
 	cpu_process += cpu_complete;
-#endif	
+#endif
 }
 
 int MattingGPU::get_out(Color32 * tex)
@@ -1138,6 +1176,7 @@ int MattingGPU::get_out(Color32 * tex)
 			p_tex[x].r = p_out_rgb[3 * x + 2];
 		}
 	}
+	LOG(DBG_LEVEL, "MattingGPU get output");
 	return 1;
 }
 
@@ -1211,6 +1250,7 @@ void process_disk_img_thread()
 				break;
 			double read_disk = ((double)getTickCount() - start) / getTickFrequency();
 			read_disk_total += read_disk;
+			LOG(DBG_LEVEL, "disk read %d", frame_num);
 			matting->process(frame_rgb);
 			double process = ((double)getTickCount() - start) / getTickFrequency() - read_disk;
 			process_total += process;
@@ -1222,6 +1262,7 @@ void process_disk_img_thread()
 		}
 		cout << "produce"<< rounds<< ",img_idx="<<img_idx<<'\n';
 	} while (--rounds != 0);
+#ifndef _USRDLL
 	cout << "average read disk time:" << read_disk_total / frame_num << '\n';
 	cout << "average process time:" << process_total / frame_num << '\n';
 #if HAVE_GPU==1 && PROFILE==1
@@ -1231,6 +1272,7 @@ void process_disk_img_thread()
 		cout << "average launch time" << matting_gpu->gpu_launch / frame_num << '\n';
 		cout << "average process time" << matting_gpu->cpu_process / frame_num << '\n';
 	}
+#endif
 #endif
 }
 
@@ -1271,30 +1313,38 @@ MattingFifo::MattingFifo()
 {	
 	buf_update = 0;
 	lost = 0;
+	frame_num = 0;
 }
 
 void MattingFifo::put(Mat & frame)
 {
+	Mat tmp_buf = frame.clone();
+	LOG(DBG_LEVEL, "frame %d come from camera", frame_num);
 	if (buf_update)
 		lost++;
 	buf_lock.lock();
-	mat_buf = frame.clone();
+	mat_buf = tmp_buf;
 	buf_update = 1;
+	frame_get = frame_num;
 	buf_lock.unlock();
+	frame_num++;
 }
 
 bool MattingFifo::get(Mat & frame)
 {
+	long long frame_process;
 	if (buf_update == 0)
 		return false;
 	buf_lock.lock();
 	frame = mat_buf;
 	buf_update = 0;
+	frame_process = frame_get;
 	buf_lock.unlock();
+	LOG(DBG_LEVEL, "frame %d begin process", frame_process);
 	return true;
 }
 
-class MattingFifo * matting_fifo;
+MattingFifo * matting_fifo;
 
 void process_camera_img_thread()
 {
@@ -1428,14 +1478,15 @@ void do_consume()
 
 int main()
 {	
+	init_log();
 #if HAVE_GPU==1
 	checkCudaErrors(cudaSetDevice(0));
 	cudaProfilerStart();
 	matting = new MattingGPU();
 #else
-	matting = new MattingCPUOrg();
+	matting = new MattingCPU();
 #endif
-	bool do_self_test = true;
+	bool do_self_test = false;
 	double time = (double)getTickCount();
 	matting->reset(WIDE, HEIGHT);	
 	if (!do_self_test) {

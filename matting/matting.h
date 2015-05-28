@@ -3,6 +3,7 @@
 #include "Gpuopt.h"
 #include <opencv2/opencv.hpp>
 #include <mutex>
+#include <stdio.h>
 
 struct Color32 {
 	unsigned char r, g, b, a;
@@ -144,6 +145,7 @@ protected:
 	std::mutex buf_lock;
 	int buf_update;
 	int lost;
+	long long frame_num, frame_get;
 public:
 	MattingFifo();
 	int get_lost() { return lost; }
@@ -151,6 +153,50 @@ public:
 	bool get(cv::Mat & frame);
 };
 
+
+#define DBG_LEVEL 0
+#define WARN_LEVEL 1
+#define ERR_LEVEL 2
+#define LOG_BUFFER 655360
+class MattingLog
+{
+protected:
+	double start_time;
+	std::mutex lock;	
+	bool log_time;
+	char * log_buf;
+	FILE * log_fp;
+	int log_len;
+	std::string filename;
+public:
+	int print_level;
+	MattingLog(std::string _filename = "log.txt", int _print_level = DBG_LEVEL, bool _log_time = true);
+	~MattingLog();
+	double get_time();
+	void log(char * s, int len);
+	void flush();
+};
+
+#ifdef MATTING_C
+MattingLog * matting_log;
+#else
+extern MattingLog * matting_log;
+#endif
+
+#define LOG(LEVEL, ...) \
+do { \
+	if (LEVEL >= matting_log->print_level) { \
+		char str[500]; \
+		int len =sprintf_s(str, 500, __VA_ARGS__); \
+		if (str[len-1]!='\n') { \
+			str[len++] ='\n'; \
+			str[len] = 0; \
+		} \
+		matting_log->log(str, len); \
+		} \
+} while (0)
+
+void init_log();
 void init_produce_thread(int mode, int produce_rate_);
 void wait_produce_thread_end();
 void write_texture(Color32 *tex, int wide, int height);

@@ -9,6 +9,7 @@ static int width;
 static int height;
 static long long index;
 extern Matting * matting;
+extern MattingFifo * matting_fifo;
 //bool start_camera_capture();
 //void stop_camera_capture();
 extern "C" {
@@ -19,6 +20,7 @@ extern "C" {
 
 	__declspec(dllexport) int MattingReset(int gpu, int width_, int height_)
 	{
+		init_log();
 #if HAVE_GPU==1
 		if (gpu)
 			matting = new MattingGPU();
@@ -36,7 +38,7 @@ extern "C" {
 
 	__declspec(dllexport) int MattingGetLost()
 	{
-		return matting->get_lost();
+		return matting->get_lost() + matting_fifo->get_lost();
 	}
 
 	__declspec(dllexport) int MattingGetNoUpdate()
@@ -64,5 +66,9 @@ extern "C" {
 	__declspec(dllexport) bool MattingGetRightHand(int *x, int *y)
 	{
 		return raise_hand_right(*x, *y);
+	}
+	__declspec(dllexport) bool MattingGetBodyCentroid(int *x, int *y)
+	{
+		return get_body_centroid(*x, *y);
 	}
 }

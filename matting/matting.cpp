@@ -3,6 +3,7 @@
 #include "Gpuopt.h"
 #include <stdio.h>
 #define MATTING_C
+//#define USE_OPENCV_BF
 #include "matting.h"
 #include "MattingPostProcess.h"
 #include <vector>
@@ -37,7 +38,7 @@ Matting * matting;
 
 struct TuningPara init_value = {
 	0,
-	8,
+	32,
 	32,
 	32,
 	16,
@@ -156,6 +157,7 @@ void check_tune_para_thread()
 		LOG(DBG_LEVEL, "read tune parameter");
 		if (read_tune_para("TuningIn.xml", tune_para)) {			
 			write_tune_para("TuningOut.xml", tune_para);
+			LOG(DBG_LEVEL, "write tune parameter");
 			if (!(old_tune_para == tune_para)) {
 				old_tune_para = tune_para;
 				LOG(DBG_LEVEL, "tune parameter change, update");
@@ -929,8 +931,10 @@ void trace_bg(PtrStepSzb motion_diff_rgb_filted0, PtrStepSzb motion_diff_rgb_fil
 void update_mask_bg(PtrStepSzb bg_diff_filted0, PtrStepSzb bg_diff_filted1, PtrStepSzb bg_diff_filted2, 
 	PtrStepSzb fg_sure, PtrStepSzb fg_maybe, PtrStepSzb is_body, cudaStream_t stream);
 
-void tune_gpu_parameter(TuningParaFloat * c);
+void box_filter_gpu(PtrStepSzb raw_in, PtrStepSzb filter_out, int ksize, float scale = -1, cudaStream_t stream = NULL);
 
+void tune_gpu_parameter(TuningParaFloat * c);
+void update_host_para(HostPara * p);
 static GpuHeap gpu_heap;
 
 static void convertRGB2RGBA(const Mat & img_rgb, const Mat & alpha, Mat & img_out)
@@ -970,6 +974,7 @@ bool MattingGPU::tune_parameter(TuningPara & para)
 
 void MattingGPU::process(Mat & frame)
 {
+
 	Mat frame_bak, frame_resized;
 	resize(frame, frame_resized, Size(638,512));
 	frame_bak = frame;
@@ -1015,9 +1020,11 @@ void MattingGPU::process(Mat & frame)
 		alpha_erode_gpu.create(frame.rows, frame.cols, CV_8U);
 		alpha_erode_gpu.setTo(0);
 		alpha_erode_cpu.create(frame.rows, frame.cols, CV_8U);
+#ifdef USE_OPENCV_BF
 		Mat kx = Mat::ones(5, 1, CV_32F);
 		kx = kx / 5.0f;
 		box_filter = gpu::createSeparableLinearFilter_GPU(CV_32FC1, CV_32FC1, kx, kx, box_buf);
+#endif
 		/*Mat element = getStructuringElement(MORPH_RECT, Size(21, 21), Point(10, 10));
 		dilate_filter = gpu::createMorphologyFilter_GPU(MORPH_DILATE, CV_8U, element, dilate_buf);*/
 		Mat kd = Mat::ones(15, 1, CV_16U);
@@ -1033,6 +1040,12 @@ void MattingGPU::process(Mat & frame)
 #endif
 	if (frame_num > 1) {
 		stream.waitForCompletion();
+		HostPara host_para;
+		host_para.body_top = body_top;
+		host_para.body_bottom = body_bottom;
+		host_para.body_left = body_left;
+		host_para.body_right = body_right;
+		update_host_para(&host_para);
 		frame_rgb_gpu.swap(frame_rgb_pre_gpu);
 		if (frame_num > 2)
 			stream.enqueueUpload(is_bg_cpu, is_bg_gpu);
@@ -1052,9 +1065,13 @@ void MattingGPU::process(Mat & frame)
 	gpu::subtract(frame_rgb_gpu, frame_rgb_pre_gpu, motion_diff_rgb, cv::gpu::GpuMat(), -1, stream);
 	gpu::split(motion_diff_rgb, split_buf, stream);
 
-	for (int i = 0; i < CHANNEL; i++)
-		box_filter->apply(split_buf[i], motion_diff_rgb_filted[i], Rect(0, 0, -1, -1), stream);
 
+	for (int i = 0; i < CHANNEL; i++)
+#ifdef USE_OPENCV_BF
+		box_filter->apply(split_buf[i], motion_diff_rgb_filted[i], Rect(0, 0, -1, -1), stream);
+#else
+		box_filter_gpu(split_buf[i], motion_diff_rgb_filted[i], 2, -1, StreamAccessor::getStream(stream));
+#endif
 	gpu_heap.free(motion_diff_rgb);
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_8UC1, fg_maybe);
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_8UC1, fg_sure);
@@ -1069,7 +1086,11 @@ void MattingGPU::process(Mat & frame)
 		gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_32F, bg_diff_filted[i]);
 	gpu::split(bg_diff_yuv, split_buf, stream);
 	for (int i = 0; i < CHANNEL; i++)
+#ifdef USE_OPENCV_BF
 		box_filter->apply(split_buf[i], bg_diff_filted[i], Rect(0, 0, -1, -1), stream);
+#else
+		box_filter_gpu(split_buf[i], bg_diff_filted[i], 2, -1, StreamAccessor::getStream(stream));
+#endif
 	stream.enqueueMemSet(fg_maybe, Scalar::all(0));
 	stream.enqueueMemSet(fg_sure, Scalar::all(0));
 
@@ -1082,9 +1103,14 @@ void MattingGPU::process(Mat & frame)
 		gpu_heap.free(bg_diff_filted[i]);
 	gpu_heap.free(bg_diff_yuv);
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_8UC1, fg_sure_d);
-
+		
+#if 1
 	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_16UC1, fg_sure_dilate);
 	dilate_filter->apply(fg_sure, fg_sure_dilate, Rect(0, 0, -1, -1), stream);
+#else
+	gpu_heap.alloc_pitch(frame.rows, frame.cols, CV_32FC1, fg_sure_dilate);
+	box_filter_gpu(fg_sure, fg_sure_dilate, 7, 1, StreamAccessor::getStream(stream));
+#endif
 	gpu::compare(fg_sure_dilate, 0, fg_sure_d, CMP_GT, stream);
 
 	//gpu::compare(fg_sure_d, 0, is_bg_gpu, CMP_EQ, stream);

@@ -135,6 +135,12 @@ public:
 	double cpu_wait, gpu_launch, cpu_process;
 #endif
 };
+struct HostPara {
+	int body_top ;
+	int body_bottom;
+	int body_left;
+	int body_right;
+};
 #endif
 
 
